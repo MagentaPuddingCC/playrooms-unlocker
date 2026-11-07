@@ -1,0 +1,345 @@
+import colorsys
+import json
+import os
+import re
+import shutil
+import traceback
+import tkinter as tk
+from tkinter import ttk, messagebox
+
+APPDATA_DIR = os.path.expandvars(
+    r"%USERPROFILE%\AppData\LocalLow\Two Pixels UG (haftungsbeschränkt)\Playrooms"
+)
+
+TIMER_KEYS = {
+    "day_duration",
+    "coffee_duration",
+    "light_transition_interval",
+    "scanner_duration",
+    "fruit_duration",
+}
+
+ALL_SKILLS = [
+    "hold_collect", "multi_ball_collect", "ball_collect_interval", "ball_capacity",
+    "ball_submit_speed", "day_duration", "interact_range", "light_transition_interval",
+    "shovel_push", "shovel_width", "ballvent_speed", "shovel_handle", "shovel_sweep_interval",
+    "ballvent_force", "ballvent_range", "ballvent_throughput", "sprint_speed", "sprint_endurance",
+    "coffee_duration", "coffee_effects", "flashlight_brightness", "flashlight_range",
+    "flashlight_battery", "flashlight_recharge", "vacuum_capacity", "vacuum_auto_upload",
+    "vacuum_speed", "vacuum_radius", "fruit_duration", "fruit_variety", "handvac_suction",
+    "handvac_tank", "handvac_cone", "handvac_range", "scanner_cooldown", "scanner_range",
+    "robot_speed", "scanner_duration", "robot_battery", "robot_charge", "robot_carry",
+    "robot_capacity", "robot_unload", "handvac_auto_upload"
+]
+
+SMART_STATS = {
+    "tool_shovel": 1, "tool_flashlight": 1, "tool_vacuum": 3, "tool_handvac": 1, 
+    "tool_scanner": 1, "tool_robot_station": 3, "tool_robot": 8, "tool_coffee_machine": 1,
+    "tool_fruit_basket": 1, "tool_ballvent": 1,
+    "win95_seen_skills_legs": 1, "win95_seen_skills_sprint": 1, "win95_seen_skills_handvac": 1, 
+    "win95_seen_skills_shovel": 1, "win95_seen_skills_vacuum": 1, "win95_seen_skills_flashlight": 1,
+    "win95_seen_skills_robot": 1,
+    "ball_pits_completed": 8, "ball_pit_completed_BallPit_1500": 1, 
+    "ball_pit_completed_BallPit_2500": 1, "ball_pit_completed_BallPit_5000": 1, 
+    "ball_pit_completed_BallPit_10000": 1, "ball_pit_completed_BallPit_20000": 1, 
+    "ball_pit_completed_BallPit_40000_01": 1, "ball_pit_completed_BallPit_40000_02": 1, 
+    "ball_pit_completed_BallPit_80000_Final": 1,
+    "door_key_playroom_right_1": 1, "door_key_playroom_right_2": 1, "door_key_playroom_right_3": 1,
+    "door_key_playroom_left_1": 1, "door_key_playroom_left_2": 1, "door_key_playroom_left_3": 1
+}
+
+def find_save_files():
+    if not os.path.exists(APPDATA_DIR):
+        return ["SaveFile_0.es3"]
+    try:
+        saves = [f for f in os.listdir(APPDATA_DIR) if f.startswith("SaveFile_") and f.endswith(".es3")]
+        return sorted(saves) if saves else ["SaveFile_0.es3"]
+    except Exception:
+        return ["SaveFile_0.es3"]
+
+def sanitize_es3_json(raw_text: str) -> str:
+    text = re.sub(r'{\s*[a-zA-Z0-9_]+\s*}', '{}', raw_text)
+    text = re.sub(r'([{,]\s*)([a-zA-Z0-9_\-]+)\s*:', r'\1"\2":', text)
+    text = re.sub(r',\s*([}\]])', r'\1', text)
+    return text
+
+def patch_file(filename, skill_lvl, exclude_timers, patch_money, money_amount, smart_inject, reset_mishaps):
+    file_path = os.path.join(APPDATA_DIR, filename)
+    backup_path = file_path + ".bak"
+
+    if not os.path.exists(backup_path) and os.path.exists(file_path):
+        shutil.copyfile(file_path, backup_path)
+
+    with open(file_path, "r", encoding="utf-8-sig", errors="replace") as f:
+        raw_text = f.read()
+
+    cleaned_text = sanitize_es3_json(raw_text)
+    data = json.loads(cleaned_text)
+    modified_count = 0
+
+    if "Skill_Save" in data and isinstance(data["Skill_Save"], dict):
+        val_data = data["Skill_Save"].get("value", {})
+        if isinstance(val_data, dict):
+            if "SkillLevels" not in val_data:
+                val_data["SkillLevels"] = {}
+            skill_dict = val_data["SkillLevels"]
+            for skill_id in ALL_SKILLS:
+                if exclude_timers and skill_id in TIMER_KEYS:
+                    if skill_id not in skill_dict:
+                        skill_dict[skill_id] = 1
+                    continue
+                skill_dict[skill_id] = skill_lvl
+                modified_count += 1
+
+            if patch_money:
+                if "Currencies" not in val_data:
+                    val_data["Currencies"] = {}
+                curr_dict = val_data["Currencies"]
+                curr_dict["Money"] = money_amount
+                curr_dict["Coins"] = money_amount
+                modified_count += 2
+
+    if smart_inject:
+        if "Statistic_Save" in data and isinstance(data["Statistic_Save"], dict):
+            stat_val = data["Statistic_Save"].get("value", data["Statistic_Save"])
+            if isinstance(stat_val, dict):
+                for key, val in SMART_STATS.items():
+                    stat_val[key] = val
+                    modified_count += 1
+                for key in list(stat_val.keys()):
+                    if key.startswith("mail_day_"):
+                        stat_val[key] = 1
+                        modified_count += 1
+                    elif key.startswith("mail_read_"):
+                        stat_val[key] = 0
+                        modified_count += 1
+
+    if reset_mishaps and "StatsLedger_Mishaps" in data and isinstance(data["StatsLedger_Mishaps"], dict):
+        val = data["StatsLedger_Mishaps"].get("value", data["StatsLedger_Mishaps"])
+        if isinstance(val, dict):
+            for m_key in ["Deaths", "BallsLost", "SecondsLost"]:
+                if m_key in val:
+                    val[m_key] = 0
+                    modified_count += 1
+
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+    return modified_count
+
+
+# =====================================================================
+# CUSTOM MODERN ROUNDED BUTTON WITH CLICK ANIMATION & HOVER STATES
+# =====================================================================
+class RoundedButton(tk.Canvas):
+    def __init__(self, parent, text, command, width=360, height=44, radius=12, bg="#2563eb", hover_bg="#3b82f6", click_bg="#1d4ed8", fg="#ffffff"):
+        super().__init__(parent, width=width, height=height, bg=parent["bg"], highlightthickness=0, cursor="hand2")
+        self.command = command
+        self.radius = radius
+        self.normal_bg = bg
+        self.hover_bg = hover_bg
+        self.click_bg = click_bg
+        self.current_bg = bg
+        self.fg = fg
+        self.w = width
+        self.h = height
+        self.text = text
+
+        self.draw_btn()
+        self.bind("<Enter>", self.on_enter)
+        self.bind("<Leave>", self.on_leave)
+        self.bind("<Button-1>", self.on_press)
+        self.bind("<ButtonRelease-1>", self.on_release)
+
+    def draw_btn(self):
+        self.delete("all")
+        r, w, h = self.radius, self.w, self.h
+        bg = self.current_bg
+        self.create_arc(0, 0, 2*r, 2*r, start=90, extent=90, fill=bg, outline="")
+        self.create_arc(w-2*r, 0, w, 2*r, start=0, extent=90, fill=bg, outline="")
+        self.create_arc(0, h-2*r, 2*r, h, start=180, extent=90, fill=bg, outline="")
+        self.create_arc(w-2*r, h-2*r, w, h, start=270, extent=90, fill=bg, outline="")
+        self.create_rectangle(r, 0, w - r, h, fill=bg, outline="")
+        self.create_rectangle(0, r, w, h - r, fill=bg, outline="")
+        self.create_text(w/2, h/2, text=self.text, fill=self.fg, font=("Segoe UI", 10, "bold"))
+
+    def on_enter(self, e):
+        self.current_bg = self.hover_bg
+        self.draw_btn()
+
+    def on_leave(self, e):
+        self.current_bg = self.normal_bg
+        self.draw_btn()
+
+    def on_press(self, e):
+        self.current_bg = self.click_bg
+        self.draw_btn()
+
+    def on_release(self, e):
+        self.current_bg = self.hover_bg
+        self.draw_btn()
+        if self.command:
+            self.command()
+
+
+# =====================================================================
+# MAIN MODERN GUI APP
+# =====================================================================
+class PlayroomsModernGUI:
+    def __init__(self, root, save_files):
+        self.root = root
+        self.root.title("Playrooms Smart Editor")
+        self.root.geometry("440x480")
+        self.root.configure(bg="#121215")
+        self.root.resizable(False, False)
+
+        self.hue_offset = 0.0
+
+        # Main Layout Canvas for Chroma Border & Rounded Card
+        self.canvas = tk.Canvas(root, width=420, height=460, bg="#121215", highlightthickness=0)
+        self.canvas.pack(padx=10, pady=10)
+
+        self.card_x1, self.card_y1 = 10, 10
+        self.card_x2, self.card_y2 = 410, 450
+        self.card_r = 16
+
+        self.draw_static_card_bg()
+
+        # Embedded Content Container
+        self.content_frame = tk.Frame(root, bg="#1a1a20")
+        self.canvas.create_window((210, 230), window=self.content_frame, width=380, height=420)
+
+        # TTK Dark Styling Configuration
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("TCombobox", fieldbackground="#272730", background="#333340", foreground="#ffffff", darkcolor="#1a1a20", lightcolor="#1a1a20", bordercolor="#333340", arrowcolor="#a0a0b0")
+        style.configure("TSpinbox", fieldbackground="#272730", background="#333340", foreground="#ffffff", bordercolor="#333340", arrowcolor="#a0a0b0")
+        style.configure("TEntry", fieldbackground="#272730", foreground="#ffffff", bordercolor="#333340")
+        style.configure("TCheckbutton", background="#1a1a20", foreground="#d1d5db", font=("Segoe UI", 9))
+        style.map("TCheckbutton", background=[("active", "#1a1a20")])
+
+        # Header Title
+        lbl_title = tk.Label(self.content_frame, text="PLAYROOMS SMART EDITOR", font=("Segoe UI", 12, "bold"), fg="#f3f4f6", bg="#1a1a20")
+        lbl_title.pack(anchor="w", padx=15, pady=(12, 1))
+
+        lbl_sub = tk.Label(self.content_frame, text="Max skills, inject tool mail & unlock progression safely", font=("Segoe UI", 8), fg="#71717a", bg="#1a1a20")
+        lbl_sub.pack(anchor="w", padx=15, pady=(0, 10))
+
+        # Save Slot Selector
+        lbl_slot = tk.Label(self.content_frame, text="SELECT SAVE SLOT", font=("Segoe UI", 8, "bold"), fg="#9ca3af", bg="#1a1a20")
+        lbl_slot.pack(anchor="w", padx=15, pady=(2, 1))
+        self.slot_var = tk.StringVar(value=save_files[0])
+        self.slot_dropdown = ttk.Combobox(self.content_frame, textvariable=self.slot_var, values=save_files, state="readonly")
+        self.slot_dropdown.pack(fill="x", padx=15, pady=(0, 8))
+
+        # Target Skill Level Spinbox
+        lbl_skill = tk.Label(self.content_frame, text="TARGET SKILL LEVEL (RECOMMENDED: 3 - 10)", font=("Segoe UI", 8, "bold"), fg="#9ca3af", bg="#1a1a20")
+        lbl_skill.pack(anchor="w", padx=15, pady=(2, 1))
+        self.skill_var = tk.IntVar(value=5)
+        self.skill_spin = ttk.Spinbox(self.content_frame, from_=1, to=50, textvariable=self.skill_var)
+        self.skill_spin.pack(fill="x", padx=15, pady=(0, 8))
+
+        # Money / Currency Input
+        self.money_check_var = tk.BooleanVar(value=True)
+        self.chk_money = ttk.Checkbutton(self.content_frame, text="Set Money / Currency Amount:", variable=self.money_check_var)
+        self.chk_money.pack(anchor="w", padx=15, pady=2)
+        self.money_var = tk.IntVar(value=999999)
+        self.money_entry = ttk.Entry(self.content_frame, textvariable=self.money_var)
+        self.money_entry.pack(fill="x", padx=15, pady=(0, 6))
+
+        # Options Checkboxes
+        self.prog_var = tk.BooleanVar(value=True)
+        self.chk_prog = ttk.Checkbutton(self.content_frame, text="Smart Inject (Unlock Sprint & Tool Mail)", variable=self.prog_var)
+        self.chk_prog.pack(anchor="w", padx=15, pady=2)
+
+        self.timer_var = tk.BooleanVar(value=True)
+        self.chk_timer = ttk.Checkbutton(self.content_frame, text="Safe Mode: Preserve Clock / Coffee Timers", variable=self.timer_var)
+        self.chk_timer.pack(anchor="w", padx=15, pady=2)
+
+        self.mishap_var = tk.BooleanVar(value=True)
+        self.chk_mishap = ttk.Checkbutton(self.content_frame, text="Reset Deaths & Lost Balls to 0", variable=self.mishap_var)
+        self.chk_mishap.pack(anchor="w", padx=15, pady=(2, 10))
+
+        # Custom Rounded Apply Button
+        self.btn_apply = RoundedButton(
+            self.content_frame,
+            text="APPLY SMART PATCH",
+            command=self.apply_changes,
+            width=350,
+            height=40,
+            radius=12,
+            bg="#2563eb",
+            hover_bg="#3b82f6",
+            click_bg="#1d4ed8",
+            fg="#ffffff"
+        )
+        self.btn_apply.pack(padx=15, pady=(0, 10))
+
+        # Start Chroma Border Loop
+        self.animate_chroma_border()
+
+    def draw_static_card_bg(self):
+        r, x1, y1, x2, y2 = self.card_r, self.card_x1, self.card_y1, self.card_x2, self.card_y2
+        bg = "#1a1a20"
+        self.canvas.create_rectangle(x1 + r, y1, x2 - r, y2, fill=bg, outline="")
+        self.canvas.create_rectangle(x1, y1 + r, x2, y2 - r, fill=bg, outline="")
+        self.canvas.create_arc(x1, y1, x1 + 2*r, y1 + 2*r, start=90, extent=90, fill=bg, outline="")
+        self.canvas.create_arc(x2 - 2*r, y1, x2, y1 + 2*r, start=0, extent=90, fill=bg, outline="")
+        self.canvas.create_arc(x1, y2 - 2*r, x1 + 2*r, y2, start=180, extent=90, fill=bg, outline="")
+        self.canvas.create_arc(x2 - 2*r, y2 - 2*r, x2, y2, start=270, extent=90, fill=bg, outline="")
+
+    def animate_chroma_border(self):
+        self.canvas.delete("chroma_border")
+        r, x1, y1, x2, y2 = self.card_r, self.card_x1, self.card_y1, self.card_x2, self.card_y2
+
+        def get_color(offset):
+            hue = (self.hue_offset + offset) % 1.0
+            rgb = colorsys.hsv_to_rgb(hue, 0.85, 1.0)
+            return f"#{int(rgb[0]*255):02x}{int(rgb[1]*255):02x}{int(rgb[2]*255):02x}"
+
+        color1 = get_color(0.0)
+        color2 = get_color(0.33)
+        color3 = get_color(0.66)
+        kw = {"width": 2, "tags": "chroma_border"}
+
+        self.canvas.create_line(x1 + r, y1, x2 - r, y1, fill=color1, **kw)
+        self.canvas.create_line(x2, y1 + r, x2, y2 - r, fill=color2, **kw)
+        self.canvas.create_line(x2 - r, y2, x1 + r, y2, fill=color3, **kw)
+        self.canvas.create_line(x1, y2 - r, x1, y1 + r, fill=color1, **kw)
+
+        self.canvas.create_arc(x1, y1, x1 + 2*r, y1 + 2*r, start=90, extent=90, style="arc", outline=color1, **kw)
+        self.canvas.create_arc(x2 - 2*r, y1, x2, y1 + 2*r, start=0, extent=90, style="arc", outline=color2, **kw)
+        self.canvas.create_arc(x2 - 2*r, y2 - 2*r, x2, y2, start=270, extent=90, style="arc", outline=color3, **kw)
+        self.canvas.create_arc(x1, y2 - 2*r, x1 + 2*r, y2, start=180, extent=90, style="arc", outline=color1, **kw)
+
+        self.hue_offset = (self.hue_offset + 0.01) % 1.0
+        self.root.after(40, self.animate_chroma_border)
+
+    def apply_changes(self):
+        try:
+            filename = self.slot_var.get()
+            skill_lvl = self.skill_var.get()
+            exclude_timers = self.timer_var.get()
+            patch_money = self.money_check_var.get()
+            money_amount = self.money_var.get()
+            smart_inject = self.prog_var.get()
+            reset_mishaps = self.mishap_var.get()
+
+            count = patch_file(filename, skill_lvl, exclude_timers, patch_money, money_amount, smart_inject, reset_mishaps)
+            messagebox.showinfo("Success", f"Patched {filename} successfully!\n({count} targeted entries updated).")
+        except Exception as e:
+            messagebox.showerror("Error", f"Patch failed:\n{e}\n\n{traceback.format_exc()}")
+
+if __name__ == "__main__":
+    try:
+        saves = find_save_files()
+        root = tk.Tk()
+        app = PlayroomsModernGUI(root, saves)
+        root.mainloop()
+    except Exception as e:
+        desktop_dir = os.path.expanduser("~/Desktop")
+        log_path = os.path.join(desktop_dir, "crash_log.txt")
+        with open(log_path, "w") as log_file:
+            log_file.write(traceback.format_exc())
+        print(f"\nScript failed to launch. Crash traceback written to: {log_path}")
+        input("\nPress Enter to exit...")
